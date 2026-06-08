@@ -4,7 +4,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from groq import Groq
@@ -34,6 +34,7 @@ class Usuario(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     senha = Column(String, nullable=False)
     vendas = relationship("Venda", back_populates="usuario")
+    mensagens = relationship("MensagemChat", back_populates="usuario")
 
 class Venda(Base):
     __tablename__ = "vendas"
@@ -43,6 +44,15 @@ class Venda(Base):
     valor = Column(Float, nullable=False)
     usuario_id = Column(Integer, ForeignKey("usuarios.id"))
     usuario = relationship("Usuario", back_populates="vendas")
+
+# NOVO MODELO PARA SALVAR O HISTÓRICO DA LUNA POR MERCADO
+class MensagemChat(Base):
+    __tablename__ = "mensagens_chat"
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String, nullable=False)  # 'user' ou 'assistant'
+    text = Column(Text, nullable=False)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    usuario = relationship("Usuario", back_populates="mensagens")
 
 Base.metadata.create_all(bind=engine)
 
@@ -73,7 +83,7 @@ def consultar_luna(pergunta_usuario: str, usuario_id: int, db):
     prompt_sistema = (
         "Você é a Luna, uma consultora de negócios e analista de inteligência comercial altamente estratégica. "
         "Seu objetivo é analisar os dados de vendas fornecidos e responder à pergunta do usuário trazendo "
-        "insights valiosos, padrões ocultos, ideias de combos, estratégias de marketing e planos de ação práticos. "
+        "insights valiosos, padrões ocultos, ideias de combos, strategies de marketing e planos de ação práticos. "
         "Seja profissional, empática, motivadora e direta.\n"
         "REGRAS CRÍTICAS DE TEXTO: Escreva em parágrafos limpos e bem espaçados. "
         "Nunca repita a mesma informação. Sempre use o formato de moeda brasileiro correto (ex: R$ 10.500,00) "
@@ -96,7 +106,7 @@ def consultar_luna(pergunta_usuario: str, usuario_id: int, db):
         return f"Desculpe, a Luna encontrou um problema: {str(e)}"
 
 # INTERFACE STREAMLIT 
-st.set_page_config(page_title="Luna AI - Mercado Luamar", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Luna Business AI", page_icon="📊", layout="centered")
 
 def cadastrar_usuario(nome, email, senha):
     db = SessionLocal()
@@ -130,6 +140,20 @@ def buscar_vendas(usuario_id):
     vendas = db.query(Venda).filter(Venda.usuario_id == usuario_id).all()
     db.close()
     return vendas
+
+# FUNÇÕES PARA GERENCIAR HISTÓRICO NO BANCO
+def salvar_mensagem_banco(role, text, usuario_id):
+    db = SessionLocal()
+    nova_msg = MensagemChat(role=role, text=text, usuario_id=usuario_id)
+    db.add(nova_msg)
+    db.commit()
+    db.close()
+
+def buscar_historico_banco(usuario_id):
+    db = SessionLocal()
+    historico = db.query(MensagemChat).filter(MensagemChat.usuario_id == usuario_id).order_by(MensagemChat.id.asc()).all()
+    db.close()
+    return [{"role": m.role, "text": m.text} for m in historico]
 
 if "usuario" not in st.session_state:
     st.session_state.usuario = None
@@ -240,7 +264,7 @@ else:
                 except Exception as e:
                     st.error(f"Erro ao ler arquivo: {str(e)}")
 
-        # PROCESSAMENTO DOS METRICS E GRÁFICOS 
+        # PROCESSAMENTO DOS METRICAS E GRÁFICOS 
         lista_vendas = buscar_vendas(st.session_state.usuario["id"])
         
         if lista_vendas:
@@ -304,41 +328,34 @@ else:
         st.subheader("🌙 Converse com a Luna AI")
         st.caption("Peça análises sobre suas vendas, ideias de promoções ou estratégias de crescimento.")
         
-        # Cria o histórico de chat se ele ainda não existir
-        if "historico_chat" not in st.session_state:
-            st.session_state.historico_chat = []
+        # BUSCA O HISTÓRICO ISOLADO DO BANCO DE DADOS NEON
+        historico_chat_usuario = buscar_historico_banco(st.session_state.usuario["id"])
             
         # Cria um container exclusivo para as mensagens para o Streamlit não se perder
         container_mensagens = st.container()
         
         with container_mensagens:
-            for msg in st.session_state.historico_chat:
+            for msg in historico_chat_usuario:
                 with st.chat_message(msg["role"]):
                     st.write(msg["text"])
                     
         pergunta = st.chat_input("Como podemos melhorar as vendas Luna?", key="input_chat_luna")
         
         if pergunta:
-            # Salva a pergunta do usuário
-            st.session_state.historico_chat.append({"role": "user", "text": pergunta})
+            # Salva a pergunta do usuário direto no banco de dados para esse usuário específico
+            salvar_mensagem_banco("user", pergunta, st.session_state.usuario["id"])
+            
+            # Exibe o carregamento simulado na tela
+            st.toast("Luna está lendo o banco de dados...", icon="🌙")
+            
+            db = SessionLocal()
+            resposta_luna = consultar_luna(
+                pergunta_usuario=pergunta,
+                usuario_id=st.session_state.usuario["id"],
+                db=db
+            )
+            db.close()
+            
+            # Adiciona a resposta da Luna direto no banco de dados para esse usuário
+            salvar_mensagem_banco("assistant", resposta_luna, st.session_state.usuario["id"])
             st.rerun()
-
-# ESSA PARTE PROCESSA A RESPOSTA DA LUNA FORA DAS ABAS 
-if st.session_state.usuario is not None and "historico_chat" in st.session_state and st.session_state.historico_chat:
-    if st.session_state.historico_chat[-1]["role"] == "user":
-        pergunta_atual = st.session_state.historico_chat[-1]["text"]
-        
-        # Exibe o carregamento simulado na tela
-        st.toast("Luna está lendo o banco de dados...", icon="🌙")
-        
-        db = SessionLocal()
-        resposta_luna = consultar_luna(
-            pergunta_usuario=pergunta_atual,
-            usuario_id=st.session_state.usuario["id"],
-            db=db
-        )
-        db.close()
-        
-        # Adiciona a resposta da Luna e recarrega a página para atualizar o chat
-        st.session_state.historico_chat.append({"role": "assistant", "text": resposta_luna})
-        st.rerun()
